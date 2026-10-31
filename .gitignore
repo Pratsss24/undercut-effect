@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.vscode/
+.idea/
+*.egg-info/
+
+# Scratch output from a run. out/ is otherwise committed on purpose, so the
+# figures referenced by the README render on GitHub.
+out/_*.txt
