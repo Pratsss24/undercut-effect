@@ -317,9 +317,10 @@ src/gaps.py             elapsed times and the gap between two cars
 src/pairs.py            undercut attempts and same-lap controls
 src/effect.py           cluster-robust least squares and the models
 src/charts.py           six figures
-src/report.py           one self-contained HTML file
+src/report.py           the printable PDF report
+src/paper.py            A4 page composition
 tests/test_undercut.py  32 tests
-out/                    figures, report.html, _run.txt
+out/                    figures, report.pdf, _run.txt
 ```
 
 ```bash

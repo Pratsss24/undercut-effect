@@ -1,232 +1,225 @@
-"""One self-contained HTML file: charts inlined, no assets, no server."""
+"""Build the report as a printable PDF.
+
+`paper.py` owns the page furniture; everything here is this project's own
+argument, in the order the argument runs.
+"""
 
 from __future__ import annotations
 
-import base64
 from pathlib import Path
 
-CSS = """
-body{font:15px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;max-width:1120px;
-margin:40px auto;padding:0 20px;color:#16181d}
-h1{margin-bottom:4px}h2{margin-top:38px;border-bottom:1px solid #e3e6ea;
-padding-bottom:6px}
-.sub{color:#5b6472;margin-top:0}
-.tiles{display:flex;gap:14px;flex-wrap:wrap;margin:22px 0}
-.tile{flex:1;min-width:150px;background:#f6f8fa;border:1px solid #e3e6ea;
-border-radius:9px;padding:14px 16px}
-.tile .v{font-size:25px;font-weight:650;letter-spacing:-.5px}
-.tile .k{font-size:11px;text-transform:uppercase;letter-spacing:.07em;
-color:#5b6472;margin-top:3px}
-table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
-th,td{border:1px solid #e3e6ea;padding:7px 10px;text-align:right}
-th:first-child,td:first-child{text-align:left}
-th{background:#f6f8fa;font-weight:600}
-td.good{color:#17803d}td.bad{color:#b4232c}
-img{width:100%;margin:14px 0;border:1px solid #e3e6ea;border-radius:7px}
-.note{background:#fff8e6;border-left:3px solid #d9a441;padding:11px 15px;
-margin:18px 0;font-size:14px}
-code{background:#f0f2f5;padding:1px 5px;border-radius:4px;font-size:13px}
-"""
+from paper import Paper
+
+SOURCE = ("Lap times and pit stops from the Jolpica mirror of the Ergast "
+          "schema. The cleaning rules and the lap-time estimator are "
+          "carried over from the stint-degradation and race-strategy-mc "
+          "projects.")
 
 
-def _img(path: Path) -> str:
-    encoded = base64.b64encode(Path(path).read_bytes()).decode("ascii")
-    return f'<img src="data:image/png;base64,{encoded}" alt="{Path(path).stem}">'
+def _advantage(value) -> str:
+    return "control (same lap)" if value == 0 else str(value)
+
+
+def _census(census: dict) -> tuple[list[str], list[list[str]]]:
+    rows = [[key, f"{value:,}"] for key, value
+            in sorted(census.items(), key=lambda item: -item[1])]
+    return (["outcome", "windows"], rows)
+
+
+def _gain(rows) -> tuple[list[str], list[list[str]]]:
+    out = [[_advantage(one["advantage"]), str(one["n"]),
+            f"{one['mean']:+.2f} ± {1.96 * one['error']:.2f}",
+            f"{one['against_control']:+.2f}", f"{one['median_age']:.0f}"]
+           for one in rows]
+    return (["laps of head start", "pairs", "seconds closed (95%)",
+             "against control", "rival tyre age"], out)
+
+
+def _terms(fit, digits: int = 4) -> tuple[list[str], list[list[str]]]:
+    rows = []
+    for name in fit.names:
+        low, high = fit.interval(name)
+        rows.append([name, f"{fit[name]:+.{digits}f}",
+                     f"{low:+.{digits}f} to {high:+.{digits}f}",
+                     f"{fit.p_value(name):.4f}"])
+    return (["term", "estimate", "95% interval", "p"], rows)
+
+
+def _decay(decay) -> tuple[list[str], list[list[str]]]:
+    rows = [[str(one["horizon"]), f"{one['value']:+.4f}",
+             f"{one['low']:+.4f} to {one['high']:+.4f}", f"{one['n']:,}"]
+            for one in decay]
+    return (["laps after the rival rejoins", "implied penalty",
+             "95% interval", "pairs"], rows)
+
+
+def _split(split) -> tuple[list[str], list[list[str]]]:
+    nan = float("nan")
+    rows = [[str(one["horizon"]), f"{one.get('ahead', nan):+.2f}",
+             f"{one.get('behind', nan):+.2f}"]
+            for one in split if one["horizon"] > 0]
+    return (["horizon", "cleared the car", "did not"], rows)
+
+
+def _place(place, late) -> tuple[list[str], list[list[str]]]:
+    rows = []
+    for one in place:
+        if one["passed"]:
+            rows.append([_advantage(one["advantage"]), str(one["n"]),
+                         str(one["passed"]), f"{one['share']:.1%}",
+                         str(one["held"]), f"{one['held_share']:.0%}"])
+        else:
+            rows.append([str(one["advantage"]), str(one["n"]), "0", "0.0%",
+                         "0", "—"])
+    return (["laps of head start", "attempts", "cleared", "share",
+             f"still ahead at {late} laps", "held"], rows)
 
 
 def build(*, census, attempts, rows, trajectory, split, decay, place,
           horizons, free, implied, lap_fit, naive, full, anchor, late,
           seasons, figures, at_zero, in_excess, out_excess,
           out_path: Path) -> Path:
-    tried = [row for row in attempts if not row.control]
-    controls = [row for row in attempts if row.control]
+    tried = [one for one in attempts if not one.control]
+    controls = [one for one in attempts if one.control]
     gap_value = implied["seconds per lap of age"]
     gap_low, gap_high = implied.interval("seconds per lap of age")
     lap_low, lap_high = lap_fit.interval("age")
-    best = max(rows[1:], key=lambda row: row["against_control"])
-    attempts_passed = sum(row["passed"] for row in place
-                          if row["advantage"] > 0)
-    attempts_total = sum(row["n"] for row in place if row["advantage"] > 0)
-    control_share = next(row["share"] for row in place
-                         if row["advantage"] == 0)
+    best = max(rows[1:], key=lambda one: one["against_control"])
+    passed = sum(one["passed"] for one in place if one["advantage"] > 0)
+    total = sum(one["n"] for one in place if one["advantage"] > 0)
+    control_share = next(one["share"] for one in place
+                         if one["advantage"] == 0)
+    out = Path(out_path)
+    out = out.with_name("report.pdf") if out.suffix != ".pdf" else out
+    out.parent.mkdir(parents=True, exist_ok=True)
 
-    tiles = [
-        ("undercut attempts", f"{len(tried):,}"),
-        ("same-lap controls", f"{len(controls):,}"),
-        ("best gain vs control", f"{best['against_control']:+.2f} s"),
-        ("attempts that cleared the car",
-         f"{attempts_passed / attempts_total:.0%}"),
-    ]
-    tiles_html = "".join(
-        f'<div class="tile"><div class="v">{v}</div><div class="k">{k}</div></div>'
-        for k, v in tiles)
+    with Paper(out, "Undercut effect",
+               f"What pitting first is actually worth, measured from "
+               f"{'-'.join(str(one) for one in seasons)} lap times alone "
+               f"— with a control group, because teams do not attempt "
+               f"undercuts at random.") as paper:
 
-    census_html = "".join(
-        f"<tr><td>{key}</td><td>{value:,}</td></tr>"
-        for key, value in sorted(census.items(), key=lambda item: -item[1]))
+        paper.cover(
+            headline=f"Worth {best['against_control']:+.2f} s against a "
+                     f"control, not against zero",
+            small=f"Best at a head start of {best['advantage']} laps, over "
+                  f"{len(tried):,} attempts against {len(controls):,} "
+                  f"same-lap controls. It clears the car "
+                  f"{passed / total:.0%} of the time.",
+            tiles=[("undercut attempts", f"{len(tried):,}"),
+                   ("same-lap controls", f"{len(controls):,}"),
+                   ("best gain vs control",
+                    f"{best['against_control']:+.2f} s"),
+                   ("attempts that cleared the car",
+                    f"{passed / total:.0%}")],
+            blurb="The gap is in the lap times. Summing a car's lap times "
+                  "gives its elapsed race time at the end of every lap, so "
+                  "the difference between two cars' sums is the gap between "
+                  "them. Exact, no interpolation, no telemetry. Everything "
+                  "here rests on that one observation.",
+            figure_path=figures["census"])
 
-    gain_html = "".join(
-        f"<tr><td>{'control (same lap)' if row['advantage'] == 0 else row['advantage']}"
-        f"</td><td>{row['n']}</td>"
-        f"<td>{row['mean']:+.2f} &plusmn; {1.96 * row['error']:.2f}</td>"
-        f'<td class="{"good" if row["against_control"] > 0 else ""}">'
-        f"{row['against_control']:+.2f}</td>"
-        f"<td>{row['median_age']:.0f}</td></tr>" for row in rows)
+        paper.section(
+            "Which windows are measured", table=_census(census),
+            after=f"In this schema a stop recorded on lap L puts "
+                  f"{in_excess:.2f} s of excess on lap L and "
+                  f"{out_excess:.2f} s on lap L+1 — the pit-lane time "
+                  f"is mostly in the out-lap. So on the lap the chased car "
+                  f"pits, the chasing car still reads {at_zero:+.1f} s: a "
+                  f"pit loss not yet paid, not an undercut that failed. "
+                  f"Every horizon below is counted from one lap after the "
+                  f"second stop, the first point at which both cars have "
+                  f"paid the same toll.")
 
-    free_html = "".join(
-        f"<tr><td>{name}</td><td>{free[name]:+.4f}</td>"
-        f"<td>{free.interval(name)[0]:+.4f} to "
-        f"{free.interval(name)[1]:+.4f}</td>"
-        f"<td>{free.p_value(name):.4f}</td></tr>" for name in free.names)
+        paper.section(
+            "What it is worth",
+            warn=f"The control is not zero. A car that is behind is usually "
+                 f"behind because it is slower, and in these windows it "
+                 f"loses about two seconds to the car ahead even when "
+                 f"neither gains any tyre advantage. Measured against zero "
+                 f"the undercut looks worthless; measured against the "
+                 f"control it is worth two to four seconds, best at a head "
+                 f"start of {best['advantage']} laps.",
+            figure_path=figures["gain"], table=_gain(rows))
 
-    decay_html = "".join(
-        f"<tr><td>{row['horizon']}</td><td>{row['value']:+.4f}</td>"
-        f"<td>{row['low']:+.4f} to {row['high']:+.4f}</td>"
-        f"<td>{row['n']:,}</td></tr>" for row in decay)
+        paper.section(
+            "Does the gain run through tyre age?",
+            note="The pure-pace model says the whole gain is the rival's "
+                 "tyre age times the head start, with no free term for the "
+                 "head start on its own. Fitting both terms tests it.",
+            body="The free head-start term is indistinguishable from zero, "
+                 "so the form the physics implies is not rejected and the "
+                 "gain can be pushed entirely through the age channel "
+                 "— which turns its coefficient into an estimate of "
+                 "the tyre-age penalty itself.",
+            table=_terms(free))
 
-    place_html = "".join(
-        f"<tr><td>{'control (same lap)' if row['advantage'] == 0 else row['advantage']}"
-        f"</td><td>{row['n']}</td><td>{row['passed']}</td>"
-        f"<td>{row['share']:.1%}</td><td>{row['held']}</td>"
-        f"<td>{row['held_share']:.0%}</td></tr>"
-        if row["passed"] else
-        f"<tr><td>{row['advantage']}</td><td>{row['n']}</td>"
-        f"<td>0</td><td>0.0%</td><td>0</td><td>&mdash;</td></tr>"
-        for row in place)
+        paper.section(
+            "A second opinion on tyre degradation",
+            note="Two estimators of the same quantity, built from different "
+                 "features of the same season: one regresses a car's lap "
+                 "times on its own tyre age, the other reads the pace "
+                 "difference between two cars over a handful of laps.",
+            warn=f"The gap-based estimate is "
+                 f"{gap_value / lap_fit['age']:.2f}× the lap-time one, "
+                 f"which is the direction a tyre cliff predicts — a "
+                 f"linear fit through stints that ended before the tyre "
+                 f"went away understates the penalty. But the intervals "
+                 f"overlap, so this is agreement between two methods rather "
+                 f"than a contradiction, and one season cannot resolve the "
+                 f"difference.",
+            figure_path=figures["estimators"],
+            table=(["estimator", "seconds per lap of age", "95% interval"],
+                   [["gaps between two cars (this project)",
+                     f"{gap_value:+.4f}",
+                     f"{gap_low:+.4f} to {gap_high:+.4f}"],
+                    ["lap times against tyre age (carried over)",
+                     f"{lap_fit['age']:+.4f}",
+                     f"{lap_low:+.4f} to {lap_high:+.4f}"]]))
 
-    payback_html = "".join(
-        f"<tr><td>{name}</td><td>{full[name]:+.3f}</td>"
-        f"<td>{full.interval(name)[0]:+.3f} to "
-        f"{full.interval(name)[1]:+.3f}</td>"
-        f"<td>{full.p_value(name):.4f}</td></tr>" for name in full.names)
+        paper.section(
+            "The pace advantage is a loan",
+            body="Read later and later, the implied penalty decays to "
+                 "nothing. That is exactly the pure-pace prediction: once "
+                 "the rival has stopped, the chasing car is the one on the "
+                 "older set, and it hands the gain back at the same rate it "
+                 "won it. On pace alone, an undercut buys nothing "
+                 "permanent.",
+            figure_path=[figures["decay"], figures["trajectories"]],
+            table=_decay(decay))
 
-    split_html = "".join(
-        f"<tr><td>{row['horizon']}</td>"
-        f'<td class="good">{row.get("ahead", float("nan")):+.2f}</td>'
-        f'<td class="bad">{row.get("behind", float("nan")):+.2f}</td></tr>'
-        for row in split if row["horizon"] > 0)
+        paper.section(
+            "But track position is not handed back",
+            body="Split by whether the move worked, the two groups behave "
+                 "completely differently: the cars that got past hold what "
+                 "they won, and the ones that did not give it all back. The "
+                 "levels in this table are selected — a pair is in the "
+                 "first group because of its value at the early horizon "
+                 "— so only the shape is informative, and the shape is "
+                 "tested with controls below.",
+            figure_path=figures["position"], table=_split(split))
 
-    html = f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<title>Undercut effect</title><style>{CSS}</style></head><body>
-<h1>Undercut effect</h1>
-<p class="sub">What pitting first is actually worth, measured from
-{"-".join(str(s) for s in seasons)} lap times alone &mdash; with a control
-group, because teams do not attempt undercuts at random.</p>
+        paper.section(
+            "What the controls do to it",
+            warn=f"Half the raw effect was composition. Without controls, "
+                 f"getting ahead appears to be worth "
+                 f"{naive['ahead after the move']:+.2f} s of avoided "
+                 f"payback. But pairs that end up ahead started about three "
+                 f"seconds apart and pairs that do not started about "
+                 f"twelve, and a pair that starts close is a pair of cars "
+                 f"of similar pace. With the starting gap in the model the "
+                 f"figure is {full['ahead after the move']:+.2f} s — "
+                 f"real, highly significant, and about half what the raw "
+                 f"comparison suggested.",
+            table=_terms(full, digits=3))
 
-<div class="tiles">{tiles_html}</div>
+        paper.section(
+            "How often it works at all",
+            body=f"Undercutting roughly triples the odds of getting past, "
+                 f"from {control_share:.1%} for a same-lap stop to "
+                 f"{passed / total:.1%}. It still fails about "
+                 f"{1 - passed / total:.0%} of the time, which is the part "
+                 f"a time-trial model of strategy cannot tell you.",
+            table=_place(place, late), after=SOURCE)
 
-<div class="note"><b>The gap is in the lap times.</b> Summing a car's lap
-times gives its elapsed race time at the end of every lap, so the
-difference between two cars' sums <i>is</i> the gap between them. Exact,
-no interpolation, no telemetry. Everything here rests on that one
-observation.</div>
-
-<h2>Which windows are measured</h2>
-{_img(figures['census'])}
-<table><tr><th>outcome</th><th>windows</th></tr>{census_html}</table>
-
-<h2>Where the pit-lane time lands</h2>
-<p>In this schema a stop recorded on lap <code>L</code> puts
-{in_excess:.2f} s of excess on lap <code>L</code> and
-{out_excess:.2f} s on lap <code>L+1</code> &mdash; the pit-lane time is
-mostly in the out-lap. So on the lap the chased car pits, the chasing car
-still reads <b>{at_zero:+.1f} s</b>: a pit loss not yet paid, not an
-undercut that failed. Every horizon below is therefore counted from one
-lap after the second stop, which is the first point at which both cars
-have paid the same toll.</p>
-
-<h2>What it is worth</h2>
-{_img(figures['gain'])}
-<table><tr><th>laps of head start</th><th>pairs</th>
-<th>seconds closed (95%)</th><th>against control</th>
-<th>rival tyre age</th></tr>{gain_html}</table>
-<p>The control is <b>not zero</b>. A car that is behind is usually behind
-because it is slower, and in these windows it loses about two seconds to
-the car ahead even when neither gains any tyre advantage. Measured against
-zero the undercut looks worthless; measured against the control it is
-worth two to four seconds, best at a head start of
-{best['advantage']} laps.</p>
-
-<h2>Does the gain run through tyre age?</h2>
-<p>The pure-pace model says the whole gain is the rival's tyre age times
-the head start, with no free term for the head start on its own: on each
-advantage lap the chasing car is quicker by exactly the age penalty, and
-that is the only channel. Fitting both terms tests it.</p>
-<table><tr><th>term</th><th>estimate</th><th>95% interval</th><th>p</th></tr>
-{free_html}</table>
-<p>The free head-start term is indistinguishable from zero, so the form
-the physics implies is not rejected and the gain can be pushed entirely
-through the age channel &mdash; which turns its coefficient into an
-estimate of the tyre-age penalty itself.</p>
-
-<h2>A second opinion on tyre degradation</h2>
-{_img(figures['estimators'])}
-<p>Two estimators of the same quantity, built from different features of
-the same season. One regresses a car's lap times on its own tyre age. The
-other reads the pace difference between two cars, one on fresh tyres and
-one not, over a handful of laps.</p>
-<table><tr><th>estimator</th><th>seconds per lap of age</th>
-<th>95% interval</th></tr>
-<tr><td>gaps between two cars (this project)</td>
-<td>{gap_value:+.4f}</td><td>{gap_low:+.4f} to {gap_high:+.4f}</td></tr>
-<tr><td>lap times against tyre age (carried over)</td>
-<td>{lap_fit['age']:+.4f}</td><td>{lap_low:+.4f} to {lap_high:+.4f}</td></tr>
-</table>
-<p>The gap-based estimate is
-<b>{gap_value / lap_fit['age']:.2f}&times;</b> the lap-time one, which is
-the direction a tyre cliff predicts &mdash; a linear fit through stints
-that ended before the tyre went away understates the penalty. But the
-intervals overlap, so this is <b>agreement between two methods rather
-than a contradiction</b>, and one season cannot resolve the difference.</p>
-
-<h2>The pace advantage is a loan</h2>
-{_img(figures['decay'])}
-<table><tr><th>laps after the rival rejoins</th><th>implied penalty</th>
-<th>95% interval</th><th>pairs</th></tr>{decay_html}</table>
-{_img(figures['trajectories'])}
-<p>Read later and later, the implied penalty decays to nothing. That is
-exactly the pure-pace prediction: once the rival has stopped, the chasing
-car is the one on the older set, and it hands the gain back at the same
-rate it won it. On pace alone, an undercut buys nothing permanent.</p>
-
-<h2>But track position is not handed back</h2>
-{_img(figures['position'])}
-<table><tr><th>horizon</th><th>cleared the car</th><th>did not</th></tr>
-{split_html}</table>
-<p>Split by whether the move worked, the two groups behave completely
-differently: the cars that got past hold what they won, and the ones that
-did not give it all back. The <i>levels</i> in that table are selected -
-a pair is in the first group because of its value at the early horizon -
-so only the shape is informative, and the shape is tested below with
-controls.</p>
-<table><tr><th>term</th><th>estimate</th><th>95% interval</th><th>p</th></tr>
-{payback_html}</table>
-<div class="note"><b>Half the raw effect was composition.</b> Without
-controls, getting ahead appears to be worth
-{naive['ahead after the move']:+.2f} s of avoided payback. But pairs that
-end up ahead started about three seconds apart and pairs that do not
-started about twelve, and a pair that starts close is a pair of cars of
-similar pace. With the starting gap in the model the figure is
-<b>{full['ahead after the move']:+.2f} s</b> &mdash; real, highly
-significant, and about half what the raw comparison suggested.</div>
-
-<h2>How often it works at all</h2>
-<table><tr><th>laps of head start</th><th>attempts</th><th>cleared</th>
-<th>share</th><th>still ahead at {late} laps</th><th>held</th></tr>
-{place_html}</table>
-<p>Undercutting roughly triples the odds of getting past, from
-{control_share:.1%} for a same-lap stop to
-{attempts_passed / attempts_total:.1%}. It still fails about
-{1 - attempts_passed / attempts_total:.0%} of the time, which is the part
-a time-trial model of strategy cannot tell you.</p>
-
-<p class="sub">Generated by <code>run.py</code>. Lap times and pit stops
-from the Jolpica mirror of the Ergast schema. The cleaning rules and the
-lap-time estimator are carried over from the stint-degradation and
-race-strategy-mc projects.</p>
-</body></html>"""
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(html, encoding="utf-8")
-    return out_path
+    return out

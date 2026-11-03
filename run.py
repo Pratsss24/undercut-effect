@@ -206,7 +206,7 @@ def main() -> None:
         at_zero=float(np.mean(at_zero)),
         in_excess=float(np.median([r.in_excess for r in green])),
         out_excess=float(np.median([r.out_excess for r in green])),
-        out_path=OUT / "report.html")
+        out_path=OUT / "report.pdf")
 
     say()
     say(f"report  {path}")
